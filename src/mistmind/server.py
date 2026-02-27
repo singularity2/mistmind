@@ -107,11 +107,13 @@ class MistMindServer:
                 Tool(
                     name="execute",
                     description=(
-                        "Execute JS against the Mist API. Use mist.request({method, path, body, params}).\n"
+                        "Execute JS against the API. Use mist.request({method, path, body, params}).\n"
+                        "CRITICAL: DO NOT GUESS ENDPOINTS! You MUST use the `search` tool first to find "
+                        "the exact path and exact required parameters before you call `execute`. Since this API "
+                        "is heavily obfuscated or unknown, your pre-trained knowledge of it is WRONG.\n"
                         "method defaults to GET. Chain multiple calls, filter/transform results in JS.\n"
                         "mist.allowedMethods shows permitted HTTP methods.\n"
-                        "For paginated results: check if total > results.length, loop with page/start params.\n"
-                        "For write ops: return a preview first, execute write only after user confirms."
+                        "For paginated results: check if total > results.length, loop with page/start params."
                     ),
                     inputSchema={
                         "type": "object",

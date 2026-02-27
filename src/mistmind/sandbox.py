@@ -418,7 +418,31 @@ const mist = await (async () => {{
         );
       }}
       
-      const url = new URL(`https://${{_host}}${{path}}`);
+      // De-obfuscate the path before making the actual request (if obfuscation is enabled)
+      // The path comes in obfuscated (e.g. /api/v1/entities/...) and must be translated back
+      // to the real Mist API (e.g. /api/v1/orgs/...)
+      // This mapping must be the EXACT inverse of the path_mapping in obfuscator.py
+      const pathMapping = {{
+          'entities': 'orgs',
+          'locations': 'sites',
+          'nodes': 'devices',
+          'wireless_networks': 'wlans',
+          'endpoints': 'clients',
+          'current_user': 'self',
+          'administrators': 'admins',
+          'service_providers': 'msps',
+          'constants': 'const',
+          'metrics': 'stats',
+      }};
+      
+      let realPath = path;
+      for (const [obfuscated, real] of Object.entries(pathMapping)) {{
+          // safely replace all occurrences of /obfuscated/ or /obfuscated at the end
+          // using lookahead for end of string or query/hash params just in case
+          realPath = realPath.replace(new RegExp(`/${{obfuscated}}((?=[/?#])|$)`, 'g'), `/${{real}}$1`);
+      }}
+      
+      const url = new URL(`https://${{_host}}${{realPath}}`);
       
       if (params) {{
         Object.entries(params).forEach(([k, v]) => {{

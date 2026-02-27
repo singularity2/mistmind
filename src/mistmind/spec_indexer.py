@@ -86,7 +86,11 @@ def generate_index(spec: dict) -> str:
         "• spec.components.schemas → data models",
         "• Common: operationId naming patterns (e.g., listOrgDevices, searchSiteClients)",
         "",
-        "ALWAYS search to discover exact paths and parameters before executing.",
+        "CRITICAL INSTRUCTIONS:",
+        "1. You DO NOT KNOW the exact paths, parameters, or endpoints for this API.",
+        "2. You MUST use the `search` tool to explore the `spec` object before EVERY `execute` call.",
+        "3. NEVER guess or assume an endpoint exists without finding it via `search` first.",
+        "4. Start broad: search for keywords in `tags` or `summary`, then drill down into specific paths.",
     ])
     
     return "\n".join(lines)

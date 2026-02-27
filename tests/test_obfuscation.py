@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from mistmind.spec_indexer import generate_index_from_file
+from mistmind.obfuscator import obfuscate_spec_file
 
 
 class TestObfuscation:
@@ -27,124 +28,14 @@ class TestObfuscation:
         spec_dir = Path(__file__).parent.parent / "spec"
         original_path = spec_dir / "mist.openapi.json"
         
-        with open(original_path, 'r') as f:
-            spec = json.load(f)
+        # Obfuscate the spec using the module
+        obfuscated_path = obfuscate_spec_file(original_path)
         
-        # Obfuscation mapping
-        path_mapping = {
-            'orgs': 'entities',
-            'sites': 'locations',
-            'devices': 'nodes',
-            'wlans': 'wireless_networks',
-            'clients': 'endpoints',
-            'self': 'current_user',
-            'admins': 'administrators',
-            'msps': 'service_providers',
-            'const': 'constants',
-            'stats': 'metrics',
-        }
-        
-        tag_mapping = {
-            'Orgs': 'Entities',
-            'Sites': 'Locations',
-            'Devices': 'Nodes',
-            'WLANs': 'Wireless Networks',
-            'Clients': 'Endpoints',
-            'Self': 'Current User',
-            'Admins': 'Administrators',
-            'MSPs': 'Service Providers',
-        }
-        
-        # Obfuscate the spec
-        obfuscated = self._obfuscate_spec(spec, path_mapping, tag_mapping)
-        
-        # Write to temp file
-        temp_file = tempfile.NamedTemporaryFile(
-            mode='w',
-            suffix='.json',
-            delete=False
-        )
-        json.dump(obfuscated, temp_file, indent=2)
-        temp_file.close()
-        
-        yield temp_file.name
+        yield str(obfuscated_path)
         
         # Cleanup
-        Path(temp_file.name).unlink(missing_ok=True)
-    
-    def _obfuscate_spec(self, spec: dict, path_mapping: dict, tag_mapping: dict) -> dict:
-        """Obfuscate an OpenAPI spec by renaming paths, tags, and operationIds.
-        
-        Args:
-            spec: Original OpenAPI spec
-            path_mapping: Dict mapping original path segments to obfuscated ones
-            tag_mapping: Dict mapping original tag prefixes to obfuscated ones
-            
-        Returns:
-            Obfuscated spec with same structure but different names
-        """
-        obfuscated = json.loads(json.dumps(spec))  # Deep copy
-        
-        # Obfuscate paths
-        new_paths = {}
-        for path, methods in obfuscated.get('paths', {}).items():
-            # Replace path segments
-            new_path = path
-            for old, new in path_mapping.items():
-                new_path = re.sub(f'/{old}/', f'/{new}/', new_path)
-                new_path = re.sub(f'/{old}$', f'/{new}', new_path)
-            
-            # Obfuscate methods
-            new_methods = {}
-            for method, op in methods.items():
-                if method not in {'get', 'post', 'put', 'delete', 'patch', 'head', 'options'}:
-                    new_methods[method] = op
-                    continue
-                
-                # Obfuscate tags
-                if 'tags' in op:
-                    new_tags = []
-                    for tag in op['tags']:
-                        new_tag = tag
-                        for old, new in tag_mapping.items():
-                            new_tag = new_tag.replace(old, new)
-                        new_tags.append(new_tag)
-                    op['tags'] = new_tags
-                
-                # Obfuscate operationId
-                if 'operationId' in op:
-                    op_id = op['operationId']
-                    for old, new in path_mapping.items():
-                        # Handle camelCase (e.g., listOrgDevices → listEntityNodes)
-                        old_camel = old.capitalize()
-                        new_camel = new.capitalize()
-                        op_id = op_id.replace(old_camel, new_camel)
-                        op_id = op_id.replace(old, new)
-                    op['operationId'] = op_id
-                
-                new_methods[method] = op
-            
-            new_paths[new_path] = new_methods
-        
-        obfuscated['paths'] = new_paths
-        
-        # Obfuscate tags metadata
-        if 'tags' in obfuscated:
-            new_tag_list = []
-            for tag in obfuscated['tags']:
-                new_tag = tag.copy()
-                name = tag.get('name', '')
-                for old, new in tag_mapping.items():
-                    name = name.replace(old, new)
-                new_tag['name'] = name
-                new_tag_list.append(new_tag)
-            obfuscated['tags'] = new_tag_list
-        
-        # Update API title
-        if 'info' in obfuscated:
-            obfuscated['info']['title'] = 'Obfuscated Test API'
-        
-        return obfuscated
+        obfuscated_path.unlink(missing_ok=True)
+
     
     def test_obfuscated_spec_generates_valid_index(self, obfuscated_spec_path):
         """Test that spec_indexer can generate an index from obfuscated spec."""
@@ -202,10 +93,19 @@ class TestObfuscation:
         """
         from mistmind.sandbox import DenoSandbox
         import asyncio
+        import shutil
+        from pathlib import Path
+        
+        # Auto-detect Deno
+        deno_path = shutil.which("deno")
+        if not deno_path:
+            home_deno = Path.home() / ".deno" / "bin" / "deno"
+            if home_deno.exists():
+                deno_path = str(home_deno)
         
         # Create sandbox
         sandbox = DenoSandbox(
-            deno_path="/Users/cheenu/.deno/bin/deno",
+            deno_path=deno_path or "/usr/local/bin/deno",
             timeout=30,
             api_mode="readonly",
         )
@@ -257,9 +157,18 @@ class TestObfuscation:
         """Test searching by scope (Entities vs Locations) works."""
         from mistmind.sandbox import DenoSandbox
         import asyncio
+        import shutil
+        from pathlib import Path
+        
+        # Auto-detect Deno
+        deno_path = shutil.which("deno")
+        if not deno_path:
+            home_deno = Path.home() / ".deno" / "bin" / "deno"
+            if home_deno.exists():
+                deno_path = str(home_deno)
         
         sandbox = DenoSandbox(
-            deno_path="/Users/cheenu/.deno/bin/deno",
+            deno_path=deno_path or "/usr/local/bin/deno",
             timeout=30,
             api_mode="readonly",
         )
@@ -329,66 +238,25 @@ class TestObfuscation:
 if __name__ == "__main__":
     """Run obfuscation tests and print the obfuscated index."""
     import sys
-    
-    # Create test instance
-    test = TestObfuscation()
+    from mistmind.obfuscator import obfuscate_spec_file
     
     # Load the original spec
     spec_dir = Path(__file__).parent.parent / "spec"
     original_path = spec_dir / "mist.openapi.json"
     
-    with open(original_path, 'r') as f:
-        spec = json.load(f)
-    
-    # Obfuscation mapping
-    path_mapping = {
-        'orgs': 'entities',
-        'sites': 'locations',
-        'devices': 'nodes',
-        'wlans': 'wireless_networks',
-        'clients': 'endpoints',
-        'self': 'current_user',
-        'admins': 'administrators',
-        'msps': 'service_providers',
-        'const': 'constants',
-        'stats': 'metrics',
-    }
-    
-    tag_mapping = {
-        'Orgs': 'Entities',
-        'Sites': 'Locations',
-        'Devices': 'Nodes',
-        'WLANs': 'Wireless Networks',
-        'Clients': 'Endpoints',
-        'Self': 'Current User',
-        'Admins': 'Administrators',
-        'MSPs': 'Service Providers',
-    }
-    
-    # Obfuscate the spec
     print("Creating obfuscated spec...")
-    obfuscated = test._obfuscate_spec(spec, path_mapping, tag_mapping)
-    
-    # Write to temp file
-    temp_file = tempfile.NamedTemporaryFile(
-        mode='w',
-        suffix='.json',
-        delete=False
-    )
-    json.dump(obfuscated, temp_file, indent=2)
-    temp_file.close()
-    obf_path = temp_file.name
+    obf_path = obfuscate_spec_file(original_path)
     
     print(f"Obfuscated spec written to: {obf_path}\n")
     
     # Generate and print index
     print("=== OBFUSCATED SPEC INDEX ===\n")
-    index = generate_index_from_file(obf_path)
+    index = generate_index_from_file(str(obf_path))
     print(index)
     
-    print(f"\n\n=== STATS ===")
+    print(f"\n\n=== STATS ===\n")
     print(f"Characters: {len(index)}")
     print(f"Estimated tokens: ~{len(index) // 4}")
     
     # Cleanup
-    Path(obf_path).unlink(missing_ok=True)
+    obf_path.unlink(missing_ok=True)

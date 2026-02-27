@@ -54,6 +54,11 @@ class ServerConfig(BaseSettings):
         default=None,
         description="Path to resolved OpenAPI spec JSON file",
     )
+    # Obfuscation flag for testing Code Mode against unknown APIs
+    mistmind_obfuscate_api: bool = Field(
+        default=False,
+        description="Obfuscate API spec at runtime for testing",
+    )
 
     def __init__(self, **kwargs):
         """Initialize config and auto-detect Deno path if not provided."""

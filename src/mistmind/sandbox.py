@@ -66,6 +66,7 @@ class DenoSandbox:
     # All Mist API hosts that should be allowed for execute
     MIST_HOSTS = [
         "api.mist.com",
+        "api.mistsys.com",
         "api.eu.mist.com",
         "api.gc1.mist.com",
         "api.gc2.mist.com",

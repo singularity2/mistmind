@@ -40,6 +40,12 @@ class MistMindServer:
                 f"spec/mist.openapi.json spec/mist.resolved.json"
             )
         
+        # Apply runtime obfuscation if configured
+        if getattr(self.config, 'mistmind_obfuscate_api', False):
+            logger.warning("WARNING: Runtime API Obfuscation ENABLED. The LLM will see a fictional API structure.")
+            from .obfuscator import obfuscate_spec_file
+            self.spec_path = obfuscate_spec_file(self.spec_path)
+        
         # Generate dynamic index from spec
         logger.info("Generating spec index...")
         self.spec_index = generate_index_from_file(str(self.spec_path))
@@ -53,6 +59,36 @@ class MistMindServer:
         @self.server.list_tools()
         async def list_tools() -> list[Tool]:
             """List available tools."""
+            is_obfuscated = getattr(self.config, 'mistmind_obfuscate_api', False)
+            
+            if is_obfuscated:
+                execute_example = (
+                    "Example: async () => { const currentUser = await mist.request({path: \"/api/v1/current_user\"}); "
+                    "const entity_id = currentUser.privileges[0].entity_id; const locations = await "
+                    "mist.request({path: `/api/v1/entities/${entity_id}/locations/search`}); return "
+                    "{entity_id, locations: locations.results?.map(l => ({name: l.name, id: l.id}))}; }"
+                )
+            else:
+                execute_example = (
+                    "Example: async () => { const self = await mist.request({path: \"/api/v1/self\"}); "
+                    "const org_id = self.privileges[0].org_id; const sites = await "
+                    "mist.request({path: `/api/v1/orgs/${org_id}/sites/search`}); return "
+                    "{org_id, sites: sites.results?.map(s => ({name: s.name, id: s.id}))}; }"
+                )
+
+            search_desc = (
+                "JavaScript async arrow function to search the OpenAPI spec. "
+                "Example: async () => { const results = []; for (const [path, methods] "
+                "of Object.entries(spec.paths)) { for (const [method, op] of "
+                "Object.entries(methods)) { if (op.tags?.some(t => "
+                't.toLowerCase().includes("wireless"))) results.push({method: '
+                "method.toUpperCase(), path, summary: op.summary}); } } return results; }"
+            )
+            
+            execute_desc = (
+                "JavaScript async arrow function to execute. " + execute_example
+            )
+            
             return [
                 Tool(
                     name="search",
@@ -62,14 +98,7 @@ class MistMindServer:
                         "properties": {
                             "code": {
                                 "type": "string",
-                                "description": (
-                                    "JavaScript async arrow function to search the OpenAPI spec. "
-                                    "Example: async () => { const results = []; for (const [path, methods] "
-                                    "of Object.entries(spec.paths)) { for (const [method, op] of "
-                                    "Object.entries(methods)) { if (op.tags?.some(t => "
-                                    't.toLowerCase().includes("wireless"))) results.push({method: '
-                                    "method.toUpperCase(), path, summary: op.summary}); } } return results; }"
-                                ),
+                                "description": search_desc,
                             }
                         },
                         "required": ["code"],
@@ -89,13 +118,7 @@ class MistMindServer:
                         "properties": {
                             "code": {
                                 "type": "string",
-                                "description": (
-                                    "JavaScript async arrow function to execute. "
-                                    'Example: async () => { const self = await mist.request({path: "/api/v1/self"}); '
-                                    "const org_id = self.privileges[0].org_id; const sites = await "
-                                    "mist.request({path: `/api/v1/orgs/${org_id}/sites/search`}); return "
-                                    "{org_id, sites: sites.results?.map(s => ({name: s.name, id: s.id}))}; }"
-                                ),
+                                "description": execute_desc,
                             }
                         },
                         "required": ["code"],

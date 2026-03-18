@@ -87,6 +87,7 @@ class DenoSandbox:
         api_mode: str = "readonly",
         rate_limit: int = 30,
         max_concurrent: int = 5,
+        obfuscated: bool = False,
     ):
         """Initialize sandbox with path to Deno binary and security settings.
         
@@ -96,6 +97,8 @@ class DenoSandbox:
             api_mode: "readonly" (GET), "readwrite" (GET+POST+PUT+PATCH), "all" (includes DELETE)
             rate_limit: Max executions per minute (0 = unlimited)
             max_concurrent: Max parallel Deno processes
+            obfuscated: If True, inject de-obfuscation mapping so obfuscated
+                paths are translated back to real API paths before fetch.
         """
         self.deno_path = deno_path
         self.timeout = timeout
@@ -103,6 +106,7 @@ class DenoSandbox:
         self.allowed_methods = API_MODE_METHODS.get(api_mode, API_MODE_METHODS["readonly"])
         self.rate_limit = rate_limit
         self.max_concurrent = max_concurrent
+        self.obfuscated = obfuscated
         
         # Rate limiting state
         self._request_times: deque = deque()
@@ -118,7 +122,15 @@ class DenoSandbox:
             raise ValueError(f"Invalid api_mode: {api_mode}. Must be one of: {list(API_MODE_METHODS.keys())}")
         
         logger.info(f"Sandbox initialized: api_mode={api_mode}, methods={self.allowed_methods}, "
-                     f"rate_limit={rate_limit}/min, max_concurrent={max_concurrent}")
+                     f"rate_limit={rate_limit}/min, max_concurrent={max_concurrent}, "
+                     f"obfuscated={obfuscated}")
+
+    def _deobfuscation_js(self) -> str:
+        """Return JS snippet to de-obfuscate paths, or empty string if not obfuscated."""
+        if not self.obfuscated:
+            return ""
+        from .obfuscator import generate_deobfuscation_js
+        return generate_deobfuscation_js()
     
     def _check_rate_limit(self) -> Optional[str]:
         """Check if rate limit is exceeded. Returns error message or None."""
@@ -418,31 +430,8 @@ const mist = await (async () => {{
         );
       }}
       
-      // De-obfuscate the path before making the actual request (if obfuscation is enabled)
-      // The path comes in obfuscated (e.g. /api/v1/entities/...) and must be translated back
-      // to the real Mist API (e.g. /api/v1/orgs/...)
-      // This mapping must be the EXACT inverse of the path_mapping in obfuscator.py
-      const pathMapping = {{
-          'entities': 'orgs',
-          'locations': 'sites',
-          'nodes': 'devices',
-          'wireless_networks': 'wlans',
-          'endpoints': 'clients',
-          'current_user': 'self',
-          'administrators': 'admins',
-          'service_providers': 'msps',
-          'constants': 'const',
-          'metrics': 'stats',
-      }};
-      
-      let realPath = path;
-      for (const [obfuscated, real] of Object.entries(pathMapping)) {{
-          // safely replace all occurrences of /obfuscated/ or /obfuscated at the end
-          // using lookahead for end of string or query/hash params just in case
-          realPath = realPath.replace(new RegExp(`/${{obfuscated}}((?=[/?#])|$)`, 'g'), `/${{real}}$1`);
-      }}
-      
-      const url = new URL(`https://${{_host}}${{realPath}}`);
+{self._deobfuscation_js()}
+      const url = new URL(`https://${{_host}}${{path}}`);
       
       if (params) {{
         Object.entries(params).forEach(([k, v]) => {{

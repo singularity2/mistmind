@@ -77,7 +77,8 @@ Press `Ctrl+C` to stop.
 
 ### Find Claude Desktop Config
 
-Location: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 
 ### Add MistMind Server
 
@@ -87,7 +88,7 @@ Edit the config file and add:
 {
   "mcpServers": {
     "mistmind": {
-      "command": "/Users/cheenu/clawd/projects/mist-mcp-code/venv/bin/python",
+      "command": "c:\\Users\\randy\\code\\mistmind\\venv\\Scripts\\python",
       "args": ["-m", "mistmind"],
       "env": {
         "MIST_APITOKEN": "your-actual-mist-token-here",

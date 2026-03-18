@@ -127,11 +127,12 @@ cp .env.example .env
 ```
 
 ### 4. Add to Claude Desktop
+Recommended for local development on Windows: point directly to this repo's venv Python.
 ```json
 {
   "mcpServers": {
     "mistmind": {
-      "command": "python",
+      "command": "c:\\Users\\randy\\code\\mistmind\\venv\\Scripts\\python",
       "args": ["-m", "mistmind"],
       "env": {
         "MIST_APITOKEN": "your-token-here",
@@ -142,6 +143,8 @@ cp .env.example .env
   }
 }
 ```
+
+On macOS/Linux, use your venv Python path (for example `/path/to/mistmind/venv/bin/python`).
 
 See `claude_desktop_config.example.json` for a full example.
 

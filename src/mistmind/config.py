@@ -54,6 +54,14 @@ class ServerConfig(BaseSettings):
         default=None,
         description="Path to resolved OpenAPI spec JSON file",
     )
+    mistmind_private_test_mode: bool = Field(
+        default=False,
+        description="Enable strict private-API test mode (obfuscated paths + search token required)",
+    )
+    mistmind_search_token_ttl_seconds: int = Field(
+        default=300,
+        description="How long search approval tokens remain valid in strict private test mode",
+    )
 
     def __init__(self, **kwargs):
         """Initialize config and auto-detect Deno path if not provided."""

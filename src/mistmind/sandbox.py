@@ -66,6 +66,7 @@ class DenoSandbox:
     # All Mist API hosts that should be allowed for execute
     MIST_HOSTS = [
         "api.mist.com",
+        "api.mistsys.com",
         "api.eu.mist.com",
         "api.gc1.mist.com",
         "api.gc2.mist.com",
@@ -176,7 +177,7 @@ class DenoSandbox:
             mode="w",
             suffix=".js",
             delete=False,
-            dir="/tmp",
+            encoding="utf-8",
         ) as tmp:
             tmp_path = tmp.name
             # Set secure permissions BEFORE writing content (0o600 = owner read/write only)
@@ -309,7 +310,12 @@ class DenoSandbox:
             except Exception as e:
                 logger.warning(f"Failed to delete temp file {tmp_path}: {e}")
 
-    async def run_search(self, code: str, spec_path: str) -> Dict[str, Any]:
+    async def run_search(
+        self,
+        code: str,
+        spec_path: str,
+        path_alias_map: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
         """Execute JavaScript code with `spec` available as a global.
         
         Args:
@@ -327,17 +333,26 @@ class DenoSandbox:
                 "stderr": "",
             }
         
-        # Build JavaScript wrapper (use file:// URL for Deno)
-        spec_url = f"file://{spec_file}"
-        js_template = f'''import spec from "{spec_url}" with {{ type: "json" }};
+        # Build JavaScript wrapper with a valid file URI for all platforms.
+        spec_url = spec_file.as_uri()
+        js_path_alias_map = json.dumps(path_alias_map or {})
+        js_template = f'''import specRaw from "{spec_url}" with {{ type: "json" }};
 
 // Freeze output function so user code can't override it
 const __output = console.log.bind(console);
+const __pathAliasMap = Object.freeze({js_path_alias_map});
+const __paths = {{}};
+for (const [realPath, methods] of Object.entries(specRaw.paths ?? {{}})) {{
+  const aliasPath = __pathAliasMap[realPath] ?? realPath;
+  __paths[aliasPath] = methods;
+}}
+const spec = {{ ...specRaw, paths: __paths }};
 
 const fn = {code};
 
 try {{
-  const result = await fn();
+  // Support both async () => {{...}} and async (spec) => {{...}}
+  const result = await fn(spec);
   __output(JSON.stringify(result, null, 2));
 }} catch(e) {{
   __output(JSON.stringify({{error: e.message, stack: e.stack}}));
@@ -360,6 +375,7 @@ try {{
         code: str,
         api_token: str,
         api_host: str,
+        approved_alias_to_real_path: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Execute JavaScript code with `mist` client available.
         
@@ -382,6 +398,8 @@ try {{
         # This prevents the token from appearing in temp files on disk
         safe_host = _js_safe_string(api_host)
         js_methods = json.dumps(self.allowed_methods)
+        js_alias_to_real_path = json.dumps(approved_alias_to_real_path or {})
+        request_timeout_ms = 10000
         # BUG 1 & 4: IIFE pattern ensures _token is in closure scope, unreachable from user code
         # Also wraps stdin read in try/catch for proper error handling
         js_template = f'''// Freeze output function so user code can't override it
@@ -399,10 +417,63 @@ const mist = await (async () => {{
   }}
   
   const __allowedMethods = Object.freeze({js_methods});
+  const __aliasToRealPath = Object.freeze({js_alias_to_real_path});
+  const __strictPathValidation = Object.keys(__aliasToRealPath).length > 0;
+  const __requestTimeoutMs = {request_timeout_ms};
+  const __trace = [];
+
+  function __isPlaceholder(segment) {{
+    return segment.startsWith("{{") && segment.endsWith("}}");
+  }}
+
+  function __matchAliasTemplate(aliasTemplate, inputPath) {{
+    const aliasParts = aliasTemplate.split("/").filter(Boolean);
+    const inputParts = inputPath.split("/").filter(Boolean);
+    if (aliasParts.length !== inputParts.length) {{
+      return null;
+    }}
+
+    const values = {{}};
+    for (let i = 0; i < aliasParts.length; i++) {{
+      const aliasSeg = aliasParts[i];
+      const inputSeg = inputParts[i];
+      if (__isPlaceholder(aliasSeg)) {{
+        values[aliasSeg.slice(1, -1)] = inputSeg;
+        continue;
+      }}
+      if (aliasSeg !== inputSeg) {{
+        return null;
+      }}
+    }}
+    return values;
+  }}
+
+  function __materializeRealTemplate(realTemplate, values) {{
+    return realTemplate.replace(/\\{{([^}}]+)\\}}/g, (_m, name) => values[name] ?? `{{${{name}}}}`);
+  }}
+
+  function __resolveRealPath(path) {{
+    if (!__strictPathValidation) {{
+      return path;
+    }}
+    for (const [aliasTemplate, realTemplate] of Object.entries(__aliasToRealPath)) {{
+      const values = __matchAliasTemplate(aliasTemplate, path);
+      if (values) {{
+        return __materializeRealTemplate(realTemplate, values);
+      }}
+    }}
+
+    throw new Error(JSON.stringify({{
+      error: "Path not approved by search token",
+      requested_path: path,
+      approved_path_count: Object.keys(__aliasToRealPath).length,
+    }}));
+  }}
   
   return Object.freeze({{
     // Allowed HTTP methods (configured server-side, cannot be bypassed)
     get allowedMethods() {{ return __allowedMethods; }},
+    get trace() {{ return __trace.slice(); }},
 
     async request({{method = "GET", path, body, params}}) {{
       const _host = {safe_host};
@@ -417,7 +488,8 @@ const mist = await (async () => {{
         );
       }}
       
-      const url = new URL(`https://${{_host}}${{path}}`);
+      const resolvedPath = __resolveRealPath(path);
+      const url = new URL(`https://${{_host}}${{resolvedPath}}`);
       
       if (params) {{
         Object.entries(params).forEach(([k, v]) => {{
@@ -438,15 +510,69 @@ const mist = await (async () => {{
       if (body && upperMethod !== 'GET') {{
         opts.body = JSON.stringify(body);
       }}
-      
-      const resp = await fetch(url.toString(), opts);
-      const data = await resp.json();
-      
-      if (!resp.ok) {{
-        throw new Error(`Mist API error ${{resp.status}}: ${{JSON.stringify(data)}}`);
+
+      const requestMeta = Object.freeze({{
+        method: upperMethod,
+        requested_path: path,
+        path: resolvedPath,
+        url: url.toString(),
+      }});
+      const startedAt = Date.now();
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), __requestTimeoutMs);
+
+      try {{
+        const resp = await fetch(url.toString(), {{ ...opts, signal: controller.signal }});
+        const elapsedMs = Date.now() - startedAt;
+        const rawText = await resp.text();
+
+        let data = null;
+        try {{
+          data = rawText ? JSON.parse(rawText) : null;
+        }} catch {{
+          data = rawText;
+        }}
+
+        const traceEntry = {{
+          ...requestMeta,
+          status: resp.status,
+          elapsed_ms: elapsedMs,
+        }};
+        __trace.push(traceEntry);
+
+        if (!resp.ok) {{
+          throw new Error(JSON.stringify({{
+            ...traceEntry,
+            error: "Mist API error",
+            response_excerpt: rawText.slice(0, 1000),
+          }}));
+        }}
+
+        return data;
+      }} catch (err) {{
+        try {{
+          const existing = JSON.parse(err?.message ?? "");
+          if (existing && typeof existing === "object" && existing.method && existing.url) {{
+            throw err;
+          }}
+        }} catch {{
+          // no-op
+        }}
+
+        const elapsedMs = Date.now() - startedAt;
+        const isAbort = err?.name === "AbortError";
+        const wrappedError = {{
+          ...requestMeta,
+          elapsed_ms: elapsedMs,
+          timeout_ms: __requestTimeoutMs,
+          error: isAbort ? "Request timeout" : "Request failed",
+          message: err?.message ?? String(err),
+        }};
+        __trace.push(wrappedError);
+        throw new Error(JSON.stringify(wrappedError));
+      }} finally {{
+        clearTimeout(timeoutId);
       }}
-      
-      return data;
     }}
   }});
 }})();
@@ -458,7 +584,7 @@ try {{
   const result = await fn();
   __output(JSON.stringify(result, null, 2));
 }} catch(e) {{
-  __output(JSON.stringify({{error: e.message, stack: e.stack}}));
+  __output(JSON.stringify({{error: e.message, stack: e.stack, trace: mist.trace}}, null, 2));
 }}
 '''
         

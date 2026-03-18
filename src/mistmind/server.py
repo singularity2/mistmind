@@ -2,6 +2,9 @@
 
 import json
 import logging
+import secrets
+import time
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +34,11 @@ class MistMindServer:
             max_concurrent=config.mistmind_max_concurrent,
         )
         self.server = Server("mistmind")
+        self.private_test_mode = config.mistmind_private_test_mode
+        self.search_token_ttl_seconds = max(30, config.mistmind_search_token_ttl_seconds)
+        self._search_sessions: dict[str, dict[str, Any]] = {}
+        self._real_to_alias_path: dict[str, str] = {}
+        self._alias_to_real_path: dict[str, str] = {}
         
         # Verify spec exists
         if not self.spec_path.exists():
@@ -44,8 +52,84 @@ class MistMindServer:
         logger.info("Generating spec index...")
         self.spec_index = generate_index_from_file(str(self.spec_path))
         logger.info(f"Spec index generated (~{len(self.spec_index) // 4} tokens)")
+
+        if self.private_test_mode:
+            self._real_to_alias_path, self._alias_to_real_path = self._build_obfuscated_path_maps()
+            logger.info(
+                "Strict private test mode enabled: %s obfuscated paths loaded, token ttl=%ss",
+                len(self._alias_to_real_path),
+                self.search_token_ttl_seconds,
+            )
         
         self._register_handlers()
+
+    def _obfuscate_path_template(self, path_template: str) -> str:
+        """Generate deterministic, non-semantic path aliases for strict private mode."""
+        segments = path_template.strip("/").split("/")
+        if not segments or segments == [""]:
+            return "/"
+
+        obfuscated: list[str] = []
+        for idx, segment in enumerate(segments):
+            if segment.startswith("{") and segment.endswith("}"):
+                obfuscated.append(segment)
+                continue
+            digest = sha256(f"{path_template}:{idx}:{segment}".encode("utf-8")).hexdigest()[:10]
+            obfuscated.append(f"s_{digest}")
+
+        return "/" + "/".join(obfuscated)
+
+    def _build_obfuscated_path_maps(self) -> tuple[dict[str, str], dict[str, str]]:
+        """Build deterministic real<->obfuscated path mappings from the local spec."""
+        spec_data = json.loads(self.spec_path.read_text(encoding="utf-8"))
+        paths = spec_data.get("paths", {})
+
+        real_to_alias: dict[str, str] = {}
+        alias_to_real: dict[str, str] = {}
+
+        for real_path in paths:
+            alias_path = self._obfuscate_path_template(real_path)
+            if alias_path in alias_to_real and alias_to_real[alias_path] != real_path:
+                suffix = 1
+                candidate = f"{alias_path}__{suffix}"
+                while candidate in alias_to_real and alias_to_real[candidate] != real_path:
+                    suffix += 1
+                    candidate = f"{alias_path}__{suffix}"
+                alias_path = candidate
+
+            real_to_alias[real_path] = alias_path
+            alias_to_real[alias_path] = real_path
+
+        return real_to_alias, alias_to_real
+
+    def _cleanup_expired_sessions(self):
+        """Drop expired search sessions."""
+        now = time.time()
+        expired = [token for token, session in self._search_sessions.items() if session["expires_at"] <= now]
+        for token in expired:
+            self._search_sessions.pop(token, None)
+
+    def _create_search_session(self) -> tuple[str, int]:
+        """Create a search approval session and return token + ttl."""
+        self._cleanup_expired_sessions()
+        token = secrets.token_urlsafe(24)
+        expires_at = time.time() + self.search_token_ttl_seconds
+        self._search_sessions[token] = {
+            "expires_at": expires_at,
+            "alias_to_real_path": dict(self._alias_to_real_path),
+        }
+        return token, self.search_token_ttl_seconds
+
+    def _get_search_session(self, token: str) -> dict[str, Any] | None:
+        """Return a valid non-expired search session."""
+        self._cleanup_expired_sessions()
+        session = self._search_sessions.get(token)
+        if not session:
+            return None
+        if session["expires_at"] <= time.time():
+            self._search_sessions.pop(token, None)
+            return None
+        return session
 
     def _register_handlers(self):
         """Register MCP tool handlers."""
@@ -53,10 +137,48 @@ class MistMindServer:
         @self.server.list_tools()
         async def list_tools() -> list[Tool]:
             """List available tools."""
+            search_description = self.spec_index
+            execute_description = (
+                "Execute JS against the Mist API. Use mist.request({method, path, body, params}).\n"
+                "method defaults to GET. Chain multiple calls, filter/transform results in JS.\n"
+                "mist.allowedMethods shows permitted HTTP methods.\n"
+                "For paginated results: check if total > results.length, loop with page/start params.\n"
+                "For write ops: return a preview first, execute write only after user confirms."
+            )
+            execute_code_description = (
+                "JavaScript async arrow function to execute. "
+                "Example: async () => { const self = await mist.request({path: '/api/v1/self'}); return self; }"
+            )
+            execute_required = ["code"]
+            execute_properties: dict[str, Any] = {
+                "code": {
+                    "type": "string",
+                    "description": execute_code_description,
+                }
+            }
+
+            if self.private_test_mode:
+                search_description += (
+                    "\n\nSTRICT PRIVATE TEST MODE: spec.paths are obfuscated aliases. "
+                    "Search responses include search_token. Pass it to execute."
+                )
+                execute_description += (
+                    "\nStrict private test mode is enabled: paths must use obfuscated templates from search, "
+                    "and search_token is required."
+                )
+                execute_properties["code"]["description"] = (
+                    "JavaScript async arrow function using obfuscated path templates from search output."
+                )
+                execute_properties["search_token"] = {
+                    "type": "string",
+                    "description": "Token returned by the latest search call.",
+                }
+                execute_required.append("search_token")
+
             return [
                 Tool(
                     name="search",
-                    description=self.spec_index,
+                    description=search_description,
                     inputSchema={
                         "type": "object",
                         "properties": {
@@ -77,28 +199,11 @@ class MistMindServer:
                 ),
                 Tool(
                     name="execute",
-                    description=(
-                        "Execute JS against the Mist API. Use mist.request({method, path, body, params}).\n"
-                        "method defaults to GET. Chain multiple calls, filter/transform results in JS.\n"
-                        "mist.allowedMethods shows permitted HTTP methods.\n"
-                        "For paginated results: check if total > results.length, loop with page/start params.\n"
-                        "For write ops: return a preview first, execute write only after user confirms."
-                    ),
+                    description=execute_description,
                     inputSchema={
                         "type": "object",
-                        "properties": {
-                            "code": {
-                                "type": "string",
-                                "description": (
-                                    "JavaScript async arrow function to execute. "
-                                    'Example: async () => { const self = await mist.request({path: "/api/v1/self"}); '
-                                    "const org_id = self.privileges[0].org_id; const sites = await "
-                                    "mist.request({path: `/api/v1/orgs/${org_id}/sites/search`}); return "
-                                    "{org_id, sites: sites.results?.map(s => ({name: s.name, id: s.id}))}; }"
-                                ),
-                            }
-                        },
-                        "required": ["code"],
+                        "properties": execute_properties,
+                        "required": execute_required,
                     },
                 ),
             ]
@@ -142,7 +247,15 @@ class MistMindServer:
         result = await self.sandbox.run_search(
             code=code,
             spec_path=str(self.spec_path),
+            path_alias_map=self._real_to_alias_path if self.private_test_mode else None,
         )
+        if self.private_test_mode:
+            token, ttl_seconds = self._create_search_session()
+            result = {
+                "search_token": token,
+                "expires_in_seconds": ttl_seconds,
+                "result": result,
+            }
         
         # Format result as text
         result_text = json.dumps(result, indent=2)
@@ -154,6 +267,26 @@ class MistMindServer:
         code = arguments.get("code")
         if not code:
             return [TextContent(type="text", text="Error: 'code' parameter required")]
+
+        approved_alias_to_real_path: dict[str, str] | None = None
+        if self.private_test_mode:
+            search_token = arguments.get("search_token")
+            if not search_token:
+                return [
+                    TextContent(
+                        type="text",
+                        text="Error: 'search_token' parameter required in strict private test mode. Run search first.",
+                    )
+                ]
+            session = self._get_search_session(search_token)
+            if not session:
+                return [
+                    TextContent(
+                        type="text",
+                        text="Error: invalid or expired search_token. Run search again to get a fresh token.",
+                    )
+                ]
+            approved_alias_to_real_path = session["alias_to_real_path"]
         
         logger.info(f"Executing API call with code length: {len(code)}")
         
@@ -161,6 +294,7 @@ class MistMindServer:
             code=code,
             api_token=self.config.mist_apitoken,
             api_host=self.config.mist_host,
+            approved_alias_to_real_path=approved_alias_to_real_path,
         )
         
         # Format result as text
